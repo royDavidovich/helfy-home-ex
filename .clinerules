@@ -1,0 +1,410 @@
+# .clinerules — Helfy Home eCommerce Platform
+
+> Cline MUST read this file in full at the start of EVERY session before producing any code, plan, or answer.
+> If any rule below conflicts with a user request, Cline MUST stop and ask for clarification before proceeding.
+
+---
+
+## 1. Project Overview
+
+Full-stack eCommerce platform built in phases: **auth → product catalog → cart → checkout → account section**.
+Development is AI-assisted via Cline across multiple sessions. Consistency between sessions is non-negotiable.
+
+---
+
+## 2. Tech Stack (LOCKED — do not substitute)
+
+### Frontend (`/frontend`)
+- **React 18** (function components only, no class components)
+- **TypeScript** in `strict` mode (`"strict": true`, `"noUncheckedIndexedAccess": true`)
+- **Vite** as bundler/dev server
+- **React Query v5** (`@tanstack/react-query`) for ALL server state
+- **Tailwind CSS** for styling (no CSS modules, no styled-components)
+- **shadcn/ui** for primitive components (copy-in, not npm-installed)
+- **Framer Motion** for animations
+- **React Router v6+** for routing
+- **React Hook Form + Zod** for forms and validation
+
+### Backend (`/backend`)
+- **Node.js** (LTS) + **Express** + **TypeScript** (strict)
+- **mysql2** (promise API) for DB access — NO Sequelize, NO Prisma, NO TypeORM
+- **Zod** for shared validation schemas
+- **bcrypt** for password hashing
+- **jsonwebtoken** for JWT signing/verification
+- **cookie-parser** for cookie handling
+
+### Auth
+- **JWT in HttpOnly cookies ONLY**
+- NEVER store tokens in `localStorage`, `sessionStorage`, or non-HttpOnly cookies
+- Cookie flags (production): `HttpOnly; Secure; SameSite=Strict; Path=/`
+- Cookie flags (dev): `HttpOnly; SameSite=Lax; Path=/`
+- Access token lifetime: 15 minutes. Refresh token (separate HttpOnly cookie): 7 days.
+
+---
+
+## 3. Repository Structure
+
+Monorepo (no Turborepo, no Nx — plain workspaces or two independent package.jsons).
+
+```
+/
+├── .clinerules                  # this file
+├── docs/
+│   ├── README.md                # manual fixes log (see §11)
+│   ├── ai-interactions.md       # session log (see §11)
+│   ├── PROGRESS.md              # current phase / next steps
+│   ├── adr/                     # architecture decision records
+│   └── features/                # one .md per feature
+├── frontend/
+│   ├── src/
+│   │   ├── api/                 # React Query hooks (one file per resource)
+│   │   ├── components/
+│   │   │   ├── ui/              # shadcn/ui primitives
+│   │   │   └── <feature>/       # feature-scoped components
+│   │   ├── features/            # feature modules (auth, catalog, cart, ...)
+│   │   ├── hooks/               # generic reusable hooks
+│   │   ├── lib/                 # utils, axios/fetch client, query client
+│   │   ├── pages/               # route-level components
+│   │   ├── types/               # shared TS types (mirror backend contracts)
+│   │   └── main.tsx
+│   ├── index.html
+│   ├── tailwind.config.ts
+│   ├── tsconfig.json
+│   └── package.json
+└── backend/
+    ├── src/
+    │   ├── routes/              # Express routers — thin, no logic
+    │   ├── controllers/         # request/response shape, calls services
+    │   ├── services/            # business logic, calls db layer
+    │   ├── db/                  # mysql2 queries (one file per table/resource)
+    │   ├── middleware/          # auth, error handler, validation
+    │   ├── schemas/             # Zod schemas (shared with FE if possible)
+    │   ├── types/
+    │   ├── config/              # env loading, db pool
+    │   ├── utils/
+    │   └── index.ts             # app bootstrap
+    ├── migrations/              # plain .sql files, numbered
+    ├── tsconfig.json
+    └── package.json
+```
+
+---
+
+## 4. Naming Conventions
+
+| Item | Convention | Example |
+|---|---|---|
+| React components | PascalCase, one per file | `ProductCard.tsx` |
+| Hooks | camelCase, prefixed `use` | `useCartQuery.ts` |
+| API hook files | camelCase, suffixed `Api` | `productsApi.ts` |
+| Backend files | camelCase | `productController.ts` |
+| DB tables | snake_case, plural | `product_variants` |
+| DB columns | snake_case | `created_at` |
+| TS types/interfaces | PascalCase, NO `I` prefix | `Product`, not `IProduct` |
+| Constants | SCREAMING_SNAKE_CASE | `MAX_CART_ITEMS` |
+| Env variables | SCREAMING_SNAKE_CASE | `JWT_SECRET` |
+| Routes (URLs) | kebab-case, plural nouns | `/api/products`, `/api/cart-items` |
+| Branches | `feature/<short-kebab-name>` | `feature/auth-login` |
+
+**Exports:** prefer named exports. Default exports allowed only for React route components (pages).
+
+---
+
+## 5. Backend Layer Pattern (STRICT)
+
+Every request flows through exactly four layers. NO layer may be skipped or merged.
+
+```
+route  →  controller  →  service  →  db
+```
+
+### Rules per layer
+
+**Route** (`src/routes/*.ts`)
+- Defines HTTP path + method + middleware chain only
+- One router per resource (`productRoutes.ts`, `authRoutes.ts`)
+- NO business logic. NO DB calls. NO Zod calls (use middleware).
+
+**Controller** (`src/controllers/*.ts`)
+- Parses `req` (params, body, cookies, user)
+- Calls ONE service method
+- Shapes the response using the standard envelope (see §7)
+- Catches nothing — errors flow to the global error middleware via `next(err)` or async wrapper
+
+**Service** (`src/services/*.ts`)
+- ALL business logic lives here
+- Pure-ish: receives plain inputs, returns plain outputs
+- NEVER touches `req`/`res`
+- May call multiple `db/*` functions, may call other services
+- Throws domain errors (`AppError`) on invalid state
+
+**DB** (`src/db/*.ts`)
+- ONLY mysql2 queries
+- Each function is a single logical query (or a transaction)
+- Returns typed rows
+- NEVER throws domain errors — only DB errors propagate
+- Uses parameterized queries ALWAYS (no string concatenation, ever)
+
+### Example skeleton (all new code must match this shape)
+
+```ts
+// routes/productRoutes.ts
+router.get('/:id', requireAuth, asyncHandler(productController.getById));
+
+// controllers/productController.ts
+export const getById = async (req: Request, res: Response) => {
+  const product = await productService.getById(Number(req.params.id));
+  res.json({ success: true, data: product });
+};
+
+// services/productService.ts
+export const getById = async (id: number): Promise<Product> => {
+  const row = await productDb.findById(id);
+  if (!row) throw new AppError('NOT_FOUND', 'Product not found', 404);
+  return row;
+};
+
+// db/productDb.ts
+export const findById = async (id: number): Promise<Product | null> => {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    'SELECT * FROM products WHERE id = ? LIMIT 1',
+    [id]
+  );
+  return (rows[0] as Product) ?? null;
+};
+```
+
+---
+
+## 6. Auth Cookie Pattern
+
+### Setting cookies (login / refresh)
+
+```ts
+res.cookie('access_token', accessJwt, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+  path: '/',
+  maxAge: 15 * 60 * 1000,
+});
+res.cookie('refresh_token', refreshJwt, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+  path: '/api/auth',
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+});
+```
+
+### Reading cookies (auth middleware)
+- `req.cookies.access_token` → verify → attach `req.user`
+- On access token expiry, frontend hits `/api/auth/refresh` which reads `refresh_token` cookie and issues a new access token
+
+### Logout
+```ts
+res.clearCookie('access_token', { path: '/' });
+res.clearCookie('refresh_token', { path: '/api/auth' });
+```
+
+### Frontend rules
+- `axios` instance (or `fetch`) MUST set `withCredentials: true` / `credentials: 'include'`
+- Frontend NEVER reads, writes, or inspects auth cookies — they are invisible to JS by design
+- "Is the user logged in?" is determined by calling `/api/auth/me`, NOT by inspecting a token
+
+---
+
+## 7. API Response Contract (MANDATORY)
+
+Every JSON response from the backend — success or failure — uses this envelope:
+
+```ts
+type ApiResponse<T> =
+  | { success: true; data: T }
+  | { success: false; error: string; code?: string };
+```
+
+- `success: true` → `data` present, `error` absent
+- `success: false` → `error` is a human-readable message, `code` is a stable machine-readable key (e.g. `'INVALID_CREDENTIALS'`, `'NOT_FOUND'`)
+- HTTP status code MUST semantically match (`200/201` for success, `4xx/5xx` for errors)
+- NEVER return raw arrays or raw objects at the top level
+- NEVER include stack traces in responses (log them server-side only)
+
+---
+
+## 8. React Query Hook Pattern
+
+One file per resource in `frontend/src/api/`. Each file exports query/mutation hooks with stable, hierarchical query keys.
+
+```ts
+// frontend/src/api/productsApi.ts
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiClient } from '@/lib/apiClient';
+import type { Product } from '@/types/product';
+
+export const productKeys = {
+  all: ['products'] as const,
+  list: (filters?: ProductFilters) => [...productKeys.all, 'list', filters] as const,
+  detail: (id: number) => [...productKeys.all, 'detail', id] as const,
+};
+
+export function useProducts(filters?: ProductFilters) {
+  return useQuery({
+    queryKey: productKeys.list(filters),
+    queryFn: async () => {
+      const res = await apiClient.get<ApiResponse<Product[]>>('/products', { params: filters });
+      if (!res.data.success) throw new Error(res.data.error);
+      return res.data.data;
+    },
+  });
+}
+
+export function useCreateProduct() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: CreateProductInput) => {
+      const res = await apiClient.post<ApiResponse<Product>>('/products', input);
+      if (!res.data.success) throw new Error(res.data.error);
+      return res.data.data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: productKeys.all }),
+  });
+}
+```
+
+### Rules
+- Query keys ALWAYS go through a `<resource>Keys` object — never inline raw arrays scattered across the codebase
+- Hooks unwrap the `ApiResponse` envelope and throw on `success: false` so React Query's `error` state works correctly
+- Components NEVER call `fetch`/`axios` directly — they consume hooks from `src/api/`
+- `apiClient` is configured ONCE in `frontend/src/lib/apiClient.ts` with `withCredentials: true`
+
+---
+
+## 9. Error Handling Rules
+
+### Backend
+- Define ONE `AppError` class with `code: string`, `message: string`, `httpStatus: number`
+- Throw `AppError` from services; let it bubble through controllers to global middleware
+- ONE global error middleware in `src/middleware/errorHandler.ts` translates errors → standard envelope
+- Unknown/unexpected errors → `{ success: false, error: 'Internal server error', code: 'INTERNAL' }` + log full error server-side
+- Wrap all async controllers with an `asyncHandler` utility — no try/catch blocks in controllers
+
+### Frontend
+- React Query's `error` state drives all error UI — do not create parallel error state
+- Show user-friendly messages sourced from `error.message` (propagated from `ApiResponse.error`)
+- NEVER use `alert()`, `confirm()`, or `prompt()` — use shadcn/ui `<Toast>` or inline error components
+- Form errors: validate with Zod before submit; map server `code` values to field-level errors where applicable
+
+---
+
+## 10. What NOT To Do (hard bans)
+
+- ❌ Storing JWTs in `localStorage` or `sessionStorage`
+- ❌ Reading or writing auth cookies from JavaScript
+- ❌ Calling `fetch`/`axios` directly inside React components
+- ❌ Putting business logic in controllers, routes, or React components
+- ❌ Putting SQL queries outside `backend/src/db/`
+- ❌ String-concatenating SQL — parameterized queries only, always
+- ❌ Using `any` in TypeScript — use `unknown` + type narrowing
+- ❌ Default exports for non-page modules
+- ❌ CSS files, CSS modules, or styled-components — Tailwind only
+- ❌ Class components in React
+- ❌ Returning raw arrays or raw objects from API endpoints — must use the envelope
+- ❌ Swallowing errors with empty `catch {}`
+- ❌ Committing `.env`, `node_modules`, `dist`, or `build`
+- ❌ Hardcoded secrets, URLs, or magic numbers — use env vars or named constants
+
+---
+
+## 11. Git Workflow
+
+### Branching model
+- `main` is always deployable
+- One branch per feature: `feature/<short-kebab-name>` (e.g. `feature/auth-login`)
+- Sub-features branch off the parent feature branch, NOT off `main`:
+  - Parent: `feature/auth`
+  - Children: `feature/auth-login`, `feature/auth-register`, `feature/auth-refresh`
+- Merge child → parent when child passes sanity check
+- Merge parent feature → `main` when the full feature passes sanity check
+
+### Commit discipline
+- Commit after EVERY meaningful change (a working unit — not every keystroke, not a half-finished file)
+- Use Conventional Commits format:
+  - `feat(auth): add login endpoint`
+  - `fix(cart): correct quantity calculation`
+  - `chore(db): add products migration`
+  - `refactor(products): extract pricing logic to service`
+  - `docs(readme): document manual fix to cookie config`
+- Subject line ≤ 72 chars, imperative mood, lowercase after type prefix
+
+### Sanity check (required before merging)
+- `tsc --noEmit` passes on both frontend and backend
+- Lint passes (no warnings treated as errors)
+- Manual smoke test of the feature
+- No console errors in browser, no unhandled rejections in server log
+- `docs/PROGRESS.md` updated to reflect current state
+
+---
+
+## 12. Documentation Protocol
+
+### `docs/ai-interactions.md` — log every Cline session
+
+At the **END of every session**, Cline MUST remind the user to append an entry using this template:
+
+```md
+## YYYY-MM-DD — <short title>
+- **Model:** <e.g. Claude Sonnet 4.5>
+- **Prompt:** <verbatim or summarized prompt>
+- **Output:** <files created/modified, key decisions, commit hash if available>
+- **Notes:** <anything noteworthy, follow-ups, things that didn't work>
+```
+
+### `docs/README.md` — log manual fixes
+
+Whenever the user manually fixes something Cline produced (or Cline couldn't handle something), Cline MUST remind the user to add an entry:
+
+```md
+## YYYY-MM-DD — <file or area>
+- **What I changed:** <concrete description of the fix>
+- **Why the AI couldn't handle it:** <root cause: missing context, hallucinated API, version mismatch, unclear spec, etc.>
+- **How to prevent recurrence:** <new rule to add, doc to update, context to include next time>
+```
+
+### Reminder cadence
+- At the **end of every session**, before `attempt_completion`, Cline MUST output this block:
+
+  > 📝 **Session log reminder:**
+  > 1. Append today's session to `docs/ai-interactions.md` (model + prompt + output).
+  > 2. If you manually fixed anything Cline produced, add it to `docs/README.md` with the root cause and prevention note.
+
+- If the user reports a manual fix **mid-session**, Cline MUST immediately suggest the `docs/README.md` entry before continuing.
+
+### `docs/PROGRESS.md`
+Updated at the end of every session with:
+- Current phase
+- Last completed unit
+- Next planned unit
+- Open questions or blockers
+
+---
+
+## 13. Session Kickoff Protocol
+
+At the start of every session, before producing any code, Cline MUST:
+
+1. Confirm it has read `.clinerules` (this file)
+2. Read `docs/PROGRESS.md` to know where we left off
+3. Read the relevant `docs/features/<feature>.md` if an in-flight feature exists
+4. Briefly summarize current state (1–3 sentences) and the proposed next step
+5. Wait for user confirmation before writing any code
+
+---
+
+## 14. When In Doubt
+
+- Prefer **explicit over clever**
+- Prefer **boring, proven patterns** over novel ones
+- If a rule here seems wrong for a specific case, STOP and ask — do not silently deviate
+- If you don't know something (a library version, an API shape), say so and ask — do not hallucinate
+- When in doubt between two valid approaches, surface both with tradeoffs and let the user decide
